@@ -88,6 +88,211 @@ npm run dev:ui
 - 推荐用 `npm run dev:ui` 启动界面；它比 `UI_MODE=true npm run dev` 更稳，尤其是 Windows shell。
 - `npm run dev` 只会执行一次 monitor，不会启动 HTTP UI。
 
+## 身份验证（可选）
+OpenClaw 控制中心支持可选的用户名/密码身份验证功能。
+
+### 前置条件
+1. **Supabase**：在 [supabase.com](https://supabase.com) 创建一个项目
+2. **Redis**：设置一个 Redis 实例（本地或云服务如 Redis Labs）
+
+### 数据库设置
+在 Supabase SQL 编辑器中运行以下 SQL 创建身份验证表：
+
+```sql
+-- 创建 users 表
+CREATE TABLE IF NOT EXISTS public.users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(50) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(10) CHECK (role IN ('admin', 'user')) DEFAULT 'user',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_login_at TIMESTAMP WITH TIME ZONE
+);
+
+-- 启用行级安全策略
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
+-- 创建索引
+CREATE INDEX IF NOT EXISTS idx_users_username ON public.users(username);
+```
+
+### 配置
+在 `.env` 文件中添加以下配置：
+
+```bash
+# 启用身份验证
+AUTH_ENABLED=true
+
+# Supabase 配置（来自你的 Supabase 项目）
+AUTH_SUPABASE_URL=https://your-project.supabase.co
+AUTH_SUPABASE_KEY=your-anon-key
+
+# Redis 配置
+AUTH_REDIS_HOST=your-redis-host
+AUTH_REDIS_PORT=6379
+
+# 会话设置（可选）
+AUTH_SESSION_TTL_SECONDS=7200
+AUTH_COOKIE_NAME=openclaw_session
+```
+
+### 初始化管理员账号
+创建管理员账户：
+
+```bash
+npm run init:admin -- --username admin --password 你的密码
+```
+
+参数说明：
+- `--username` - 用户名（默认：admin）
+- `--password` - 密码（默认：admin123）
+- `--role` - 角色：admin 或 user（默认：admin）
+
+### 开发命令
+```bash
+# 启用身份验证后启动 UI
+npm run dev:ui
+
+# 创建新用户
+npm run init:admin -- --username 新用户名 --password 新密码 --role user
+
+# 测试登录
+curl -X POST http://127.0.0.1:4310/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"你的密码"}'
+```
+
+### API 接口
+- `POST /api/auth/login` - 登录
+- `POST /api/auth/logout` - 登出
+- `GET /api/auth/me` - 获取当前用户信息
+- `GET /api/auth/verify` - 验证会话
+
+## 生产环境部署
+
+### 前置条件
+- Node.js 20+
+- Redis（用于会话存储）
+- Supabase 项目（用于用户数据）
+
+### 生产环境构建
+```bash
+# 安装依赖
+npm install
+
+# 构建 TypeScript
+npm run build
+
+# 构建产物在 dist/ 目录
+```
+
+### 生产环境部署选项
+
+#### 选项 1：直接运行
+```bash
+# 设置生产环境
+NODE_ENV=production
+
+# 启动 UI 服务器
+UI_MODE=true node dist/src/index.js
+```
+
+#### 选项 2：使用进程管理器 (PM2)
+```bash
+# 安装 PM2
+npm install -g pm2
+
+# 使用 PM2 启动
+pm2 start dist/src/index.js --name openclaw-cc -- \
+  UI_MODE=true
+```
+
+#### 选项 3：Docker 部署
+创建 `Dockerfile`:
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+# 安装依赖
+COPY package*.json ./
+RUN npm install
+
+# 构建
+RUN npm run build
+
+# 环境变量
+ENV NODE_ENV=production
+ENV UI_MODE=true
+
+# 暴露端口
+EXPOSE 4310
+
+# 启动
+CMD ["node", "dist/src/index.js"]
+```
+
+构建和运行：
+```bash
+docker build -t openclaw-control-center .
+docker run -d -p 4310:4310 \
+  -e GATEWAY_URL=ws://your-gateway:18789 \
+  -e AUTH_ENABLED=true \
+  -e AUTH_SUPABASE_URL=... \
+  -e AUTH_SUPABASE_KEY=... \
+  -e AUTH_REDIS_HOST=... \
+  openclaw-control-center
+```
+
+### 生产环境变量配置
+```bash
+# 核心配置
+UI_MODE=true
+UI_PORT=4310
+UI_BIND_ADDRESS=0.0.0.0  # 允许外部连接
+
+# 网关配置
+GATEWAY_URL=ws://your-openclaw-gateway:18789
+
+# 身份验证（生产环境建议启用）
+AUTH_ENABLED=true
+AUTH_SUPABASE_URL=https://your-project.supabase.co
+AUTH_SUPABASE_KEY=your-anon-key
+AUTH_REDIS_HOST=your-redis-host
+AUTH_REDIS_PORT=6379
+AUTH_SESSION_TTL_SECONDS=7200
+AUTH_COOKIE_NAME=openclaw_session
+```
+
+### 安全注意事项
+1. **使用 HTTPS** - 在反向代理（nginx、Caddy 或云负载均衡器）后运行
+2. **保护 Redis** - 使用密码保护的 Redis 或专用网络
+3. **Cookie 安全** - 生产环境设置 `Secure` 标志（当 `NODE_ENV=production` 时自动启用）
+4. **防火墙** - 仅允许受信任网络访问 4310 端口
+5. **保持 AUTH_ENABLED=true** - 生产环境始终启用身份验证
+
+### 反向代理示例 (nginx)
+```nginx
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:4310;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
 ## 分区功能说明
 
 ### 总览

@@ -7,6 +7,14 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import {
   APPROVAL_ACTIONS_DRY_RUN,
   APPROVAL_ACTIONS_ENABLED,
+  AUTH_ENABLED,
+  AUTH_COOKIE_NAME,
+  AUTH_REDIS_HOST,
+  AUTH_REDIS_PASSWORD,
+  AUTH_REDIS_PORT,
+  AUTH_SESSION_TTL_SECONDS,
+  AUTH_SUPABASE_KEY,
+  AUTH_SUPABASE_URL,
   IMPORT_MUTATION_DRY_RUN,
   IMPORT_MUTATION_ENABLED,
   LOCAL_API_TOKEN,
@@ -16,6 +24,14 @@ import {
   READONLY_MODE,
 } from "../config";
 import type { ToolClient } from "../clients/tool-client";
+import {
+  initSupabaseClient,
+  initRedisClient,
+  login as authLogin,
+  logout as authLogout,
+  verifySession as authVerifySession,
+  getCurrentUser as authGetCurrentUser,
+} from "../auth";
 import { mapSessionsListToSummaries } from "../mappers/openclaw-mappers";
 import { buildApiDocs } from "../runtime/api-docs";
 import { computeBudgetSummary } from "../runtime/budget-governance";
@@ -916,6 +932,32 @@ interface LinkageGraph {
 }
 
 export function startUiServer(port: number, toolClient: ToolClient): Server {
+  // Initialize auth clients if enabled
+  if (AUTH_ENABLED) {
+    if (!AUTH_SUPABASE_URL || !AUTH_SUPABASE_KEY) {
+      console.error("[auth] AUTH_ENABLED but missing SUPABASE_URL or SUPABASE_KEY");
+      process.exit(1);
+    }
+    initSupabaseClient({
+      supabaseUrl: AUTH_SUPABASE_URL,
+      supabaseKey: AUTH_SUPABASE_KEY,
+      redisHost: AUTH_REDIS_HOST,
+      redisPort: AUTH_REDIS_PORT,
+      sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
+      cookieName: AUTH_COOKIE_NAME,
+    });
+    initRedisClient({
+      supabaseUrl: AUTH_SUPABASE_URL,
+      supabaseKey: AUTH_SUPABASE_KEY,
+      redisHost: AUTH_REDIS_HOST,
+      redisPort: AUTH_REDIS_PORT,
+      redisPassword: AUTH_REDIS_PASSWORD,
+      sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
+      cookieName: AUTH_COOKIE_NAME,
+    });
+    console.log("[auth] Initialized successfully");
+  }
+
   const approvalActions = new ApprovalActionService(toolClient);
 
   const server = createServer(async (req, res) => {
@@ -928,6 +970,31 @@ export function startUiServer(port: number, toolClient: ToolClient): Server {
       const path = url.pathname;
       const legacySection = resolveLegacyDashboardSection(path);
       const legacyAnchor = resolveLegacyDashboardAnchor(path);
+
+      // Login page route
+      if (AUTH_ENABLED && method === "GET" && path === "/login") {
+        // Check if already logged in - redirect to dashboard
+        const sessionToken = readCookie(req, AUTH_COOKIE_NAME);
+        if (sessionToken) {
+          const result = await authVerifySession(sessionToken);
+          if (result.valid) {
+            return redirect(res, 302, "/");
+          }
+        }
+        return writeText(res, 200, renderLoginPage(), "text/html; charset=utf-8");
+      }
+
+      // Auth check for dashboard - redirect to login if not authenticated
+      if (AUTH_ENABLED && method === "GET" && path === "/") {
+        const sessionToken = readCookie(req, AUTH_COOKIE_NAME);
+        if (!sessionToken) {
+          return redirect(res, 302, "/login");
+        }
+        const result = await authVerifySession(sessionToken);
+        if (!result.valid) {
+          return redirect(res, 302, "/login");
+        }
+      }
 
       if (method === "GET" && (path === "/" || legacySection)) {
         const prefs = await loadUiPreferences();
@@ -1891,6 +1958,70 @@ export function startUiServer(port: number, toolClient: ToolClient): Server {
           reason,
         });
         return writeJson(res, result.mode === "blocked" ? 403 : result.ok ? 200 : 500, result);
+      }
+
+      // Auth API endpoints
+      if (AUTH_ENABLED) {
+        // POST /api/auth/login
+        if (method === "POST" && path === "/api/auth/login") {
+          try {
+            assertJsonContentType(req);
+            const payload = expectObject(await readJsonBody(req), "login payload");
+            const username = requiredBoundedString(payload.username, "username", 50);
+            const password = requiredBoundedString(payload.password, "password", 100);
+
+            const result = await authLogin({ username, password }, AUTH_SESSION_TTL_SECONDS);
+
+            if (result.success && result.user) {
+              // Create session and set cookie
+              const { createSession } = await import("../auth/session-service");
+              const session = await createSession(result.user.id, AUTH_SESSION_TTL_SECONDS);
+              setCookie(res, AUTH_COOKIE_NAME, session.session_token, AUTH_SESSION_TTL_SECONDS);
+              return writeJson(res, 200, { ok: true, user: result.user });
+            }
+
+            return writeJson(res, 401, { ok: false, error: result.error ?? "Login failed" });
+          } catch (error) {
+            console.error("[auth] Login error:", error);
+            throw error;
+          }
+        }
+
+        // POST /api/auth/logout
+        if (method === "POST" && path === "/api/auth/logout") {
+          const sessionToken = readCookie(req, AUTH_COOKIE_NAME);
+          if (sessionToken) {
+            await authLogout(sessionToken);
+            clearCookie(res, AUTH_COOKIE_NAME);
+          }
+          return writeJson(res, 200, { ok: true });
+        }
+
+        // GET /api/auth/me
+        if (method === "GET" && path === "/api/auth/me") {
+          const sessionToken = readCookie(req, AUTH_COOKIE_NAME);
+          if (!sessionToken) {
+            return writeJson(res, 200, { ok: true, authenticated: false, user: null });
+          }
+
+          const result = await authVerifySession(sessionToken);
+          if (!result.valid) {
+            return writeJson(res, 200, { ok: true, authenticated: false, user: null });
+          }
+
+          return writeJson(res, 200, { ok: true, authenticated: true, user: result.user });
+        }
+
+        // GET /api/auth/verify
+        if (method === "GET" && path === "/api/auth/verify") {
+          const sessionToken = readCookie(req, AUTH_COOKIE_NAME);
+          if (!sessionToken) {
+            return writeJson(res, 200, { valid: false });
+          }
+
+          const result = await authVerifySession(sessionToken);
+          return writeJson(res, 200, result);
+        }
       }
 
       if (path.startsWith("/api/")) {
@@ -17067,6 +17198,316 @@ function renderSessionPreviewRows(items: SessionConversationListItem[], language
     .join("");
 }
 
+function renderLoginPage(): string {
+  const t = (en: string, zh: string): string => pickUiText("zh", en, zh);
+
+  return `<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${t("Login - OpenClaw Control Center", "登录 - OpenClaw 控制中心")}</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg: #eef2f6;
+      --card-bg: #ffffff;
+      --text-primary: #1d1d1f;
+      --text-secondary: #6e6e73;
+      --focus: #0071e3;
+      --success: #248a3d;
+      --warning: #b57f10;
+      --error: #d23f31;
+      --border: #d2d2d7;
+      --input-bg: #f5f5f7;
+      --radius-input: 12px;
+      --radius-button: 14px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #050608;
+        --card-bg: rgba(255, 255, 255, 0.038);
+        --text-primary: rgba(250, 251, 253, 0.96);
+        --text-secondary: rgba(250, 251, 253, 0.6);
+        --focus: #dbe8fb;
+        --border: rgba(255, 255, 255, 0.1);
+        --input-bg: rgba(255, 255, 255, 0.05);
+      }
+    }
+
+    body {
+      font-family: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont,
+                   "PingFang SC", "Noto Sans SC", "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .login-card {
+      background: var(--card-bg);
+      border-radius: 20px;
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .login-card {
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+      }
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 36px;
+    }
+
+    .logo h1 {
+      font-size: 24px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .logo p {
+      font-size: 14px;
+      color: var(--text-secondary);
+      margin-top: 8px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 8px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 14px 16px;
+      font-size: 16px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-input);
+      background: var(--input-bg);
+      color: var(--text-primary);
+      outline: none;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .form-group input:focus {
+      border-color: var(--focus);
+      box-shadow: 0 0 0 4px rgba(0, 113, 227, 0.15);
+    }
+
+    .form-group input::placeholder {
+      color: var(--text-secondary);
+    }
+
+    .password-wrapper {
+      position: relative;
+    }
+
+    .password-toggle {
+      position: absolute;
+      right: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 4px 8px;
+    }
+
+    .password-toggle:hover {
+      color: var(--text-primary);
+    }
+
+    .submit-btn {
+      width: 100%;
+      padding: 14px 20px;
+      font-size: 16px;
+      font-weight: 600;
+      color: #fff;
+      background: var(--focus);
+      border: none;
+      border-radius: var(--radius-button);
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+      margin-top: 8px;
+    }
+
+    .submit-btn:hover {
+      opacity: 0.92;
+    }
+
+    .submit-btn:active {
+      transform: scale(0.98);
+    }
+
+    .submit-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .error-message {
+      background: rgba(210, 63, 49, 0.1);
+      color: var(--error);
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 14px;
+      margin-bottom: 20px;
+      display: none;
+    }
+
+    .error-message.show {
+      display: block;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 24px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="logo">
+      <h1>${t("OpenClaw", "OpenClaw")}</h1>
+      <p>${t("Control Center", "控制中心")}</p>
+    </div>
+
+    <div id="error" class="error-message"></div>
+
+    <form id="loginForm">
+      <div class="form-group">
+        <label for="username">${t("Username", "用户名")}</label>
+        <input type="text" id="username" name="username" required autocomplete="username" />
+      </div>
+
+      <div class="form-group">
+        <label for="password">${t("Password", "密码")}</label>
+        <div class="password-wrapper">
+          <input type="password" id="password" name="password" required autocomplete="current-password" />
+          <button type="button" class="password-toggle" id="togglePassword">${t("Show", "显示")}</button>
+        </div>
+      </div>
+
+      <button type="submit" class="submit-btn" id="submitBtn">${t("Sign In", "登 录")}</button>
+    </form>
+
+    <div class="footer">
+      ${t("Enter your credentials to continue", "请输入您的凭据以继续")}
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('loginForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const errorDiv = document.getElementById('error');
+    const passwordInput = document.getElementById('password');
+    const toggleBtn = document.getElementById('togglePassword');
+
+    toggleBtn.addEventListener('click', () => {
+      if (passwordInput.type === 'password') {
+        passwordInput.type = 'text';
+        toggleBtn.textContent = '${t("Hide", "隐藏")}';
+      } else {
+        passwordInput.type = 'password';
+        toggleBtn.textContent = '${t("Show", "显示")}';
+      }
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+
+      if (!username || !password) {
+        showError('${t("Please enter username and password", "请输入用户名和密码")}');
+        return;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.innerHTML = '<span class="spinner"></span>${t("Signing in...", "登录中...")}';
+      errorDiv.classList.remove('show');
+
+      try {
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ username, password }),
+        });
+
+        const data = await response.json();
+
+        if (data.ok) {
+          window.location.href = '/';
+        } else {
+          showError(data.error || '${t("Login failed", "登录失败")}');
+          submitBtn.disabled = false;
+          submitBtn.textContent = '${t("Sign In", "登 录")}';
+        }
+      } catch (err) {
+        showError('${t("Network error", "网络错误")}');
+        submitBtn.disabled = false;
+        submitBtn.textContent = '${t("Sign In", "登 录")}';
+      }
+    });
+
+    function showError(message) {
+      errorDiv.textContent = message;
+      errorDiv.classList.add('show');
+    }
+
+    // Handle Enter key
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') {
+        form.dispatchEvent(new Event('submit'));
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
 function renderSessionDrilldownPage(
   detail: SessionConversationDetailResult,
   language: UiLanguage = "en",
@@ -17717,6 +18158,37 @@ function redirect(res: ServerResponse, statusCode: number, location: string): vo
   if (requestId) headers["x-request-id"] = requestId;
   res.writeHead(statusCode, headers);
   res.end();
+}
+
+function readCookie(req: IncomingMessage, name: string): string | null {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+
+  const cookies = cookieHeader.split(";").map((c) => c.trim());
+  for (const cookie of cookies) {
+    const [cookieName, cookieValue] = cookie.split("=");
+    if (cookieName === name) {
+      return cookieValue;
+    }
+  }
+  return null;
+}
+
+function setCookie(
+  res: ServerResponse,
+  name: string,
+  value: string,
+  maxAgeSeconds: number,
+): void {
+  const isSecure = process.env.NODE_ENV === "production";
+  res.setHeader(
+    "Set-Cookie",
+    `${name}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}${isSecure ? "; Secure" : ""}`,
+  );
+}
+
+function clearCookie(res: ServerResponse, name: string): void {
+  res.setHeader("Set-Cookie", `${name}=; HttpOnly; Path=/; Max-Age=0`);
 }
 
 function resolveRequestId(req: IncomingMessage): string {

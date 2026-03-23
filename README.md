@@ -88,6 +88,211 @@ Notes:
 - Prefer `npm run dev:ui`; it is the more reliable cross-platform entry, especially on Windows shells.
 - `npm run dev` only performs one monitor pass and does not start the HTTP UI.
 
+## Authentication (Optional)
+OpenClaw Control Center supports optional username/password authentication.
+
+### Prerequisites
+1. **Supabase**: Create a project at [supabase.com](https://supabase.com)
+2. **Redis**: Set up a Redis instance (local or cloud like Redis Labs)
+
+### Database Setup
+Run the following SQL in your Supabase SQL Editor to create the authentication tables:
+
+```sql
+-- Create users table
+CREATE TABLE IF NOT EXISTS public.users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(50) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(10) CHECK (role IN ('admin', 'user')) DEFAULT 'user',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_login_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Enable Row Level Security
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
+-- Create index
+CREATE INDEX IF NOT EXISTS idx_users_username ON public.users(username);
+```
+
+### Configuration
+Add the following to your `.env` file:
+
+```bash
+# Enable authentication
+AUTH_ENABLED=true
+
+# Supabase configuration (from your Supabase project)
+AUTH_SUPABASE_URL=https://your-project.supabase.co
+AUTH_SUPABASE_KEY=your-anon-key
+
+# Redis configuration
+AUTH_REDIS_HOST=your-redis-host
+AUTH_REDIS_PORT=6379
+
+# Session settings (optional)
+AUTH_SESSION_TTL_SECONDS=7200
+AUTH_COOKIE_NAME=openclaw_session
+```
+
+### Initialize Admin User
+Create an admin account:
+
+```bash
+npm run init:admin -- --username admin --password yourpassword
+```
+
+Options:
+- `--username` - Username (default: admin)
+- `--password` - Password (default: admin123)
+- `--role` - Role: admin or user (default: admin)
+
+### Development Commands
+```bash
+# Start UI with authentication enabled
+npm run dev:ui
+
+# Initialize a new user
+npm run init:admin -- --username newuser --password newpassword --role user
+
+# Test login
+curl -X POST http://127.0.0.1:4310/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"yourpassword"}'
+```
+
+### API Endpoints
+- `POST /api/auth/login` - Login
+- `POST /api/auth/logout` - Logout
+- `GET /api/auth/me` - Get current user
+- `GET /api/auth/verify` - Verify session
+
+## Production Deployment
+
+### Prerequisites
+- Node.js 20+
+- Redis (for session storage)
+- Supabase project (for user data)
+
+### Build for Production
+```bash
+# Install dependencies
+npm install
+
+# Build TypeScript
+npm run build
+
+# Build produces dist/ directory
+```
+
+### Production Options
+
+#### Option 1: Run Directly
+```bash
+# Set production environment
+NODE_ENV=production
+
+# Start UI server
+UI_MODE=true node dist/src/index.js
+```
+
+#### Option 2: Use Process Manager (PM2)
+```bash
+# Install PM2
+npm install -g pm2
+
+# Start with PM2
+pm2 start dist/src/index.js --name openclaw-cc -- \
+  UI_MODE=true
+```
+
+#### Option 3: Docker Deployment
+Create a `Dockerfile`:
+
+```dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package*.json ./
+RUN npm install
+
+# Build
+RUN npm run build
+
+# Environment variables
+ENV NODE_ENV=production
+ENV UI_MODE=true
+
+# Expose port
+EXPOSE 4310
+
+# Start
+CMD ["node", "dist/src/index.js"]
+```
+
+Build and run:
+```bash
+docker build -t openclaw-control-center .
+docker run -d -p 4310:4310 \
+  -e GATEWAY_URL=ws://your-gateway:18789 \
+  -e AUTH_ENABLED=true \
+  -e AUTH_SUPABASE_URL=... \
+  -e AUTH_SUPABASE_KEY=... \
+  -e AUTH_REDIS_HOST=... \
+  openclaw-control-center
+```
+
+### Environment Variables for Production
+```bash
+# Core
+UI_MODE=true
+UI_PORT=4310
+UI_BIND_ADDRESS=0.0.0.0  # Allow external connections
+
+# Gateway
+GATEWAY_URL=ws://your-openclaw-gateway:18789
+
+# Authentication (recommended for production)
+AUTH_ENABLED=true
+AUTH_SUPABASE_URL=https://your-project.supabase.co
+AUTH_SUPABASE_KEY=your-anon-key
+AUTH_REDIS_HOST=your-redis-host
+AUTH_REDIS_PORT=6379
+AUTH_SESSION_TTL_SECONDS=7200
+AUTH_COOKIE_NAME=openclaw_session
+```
+
+### Security Considerations
+1. **Use HTTPS** - Run behind a reverse proxy (nginx, Caddy, or cloud load balancer)
+2. **Secure Redis** - Use password-protected Redis or private network
+3. **Cookie Security** - Set `Secure` flag in production (automatic when `NODE_ENV=production`)
+4. **Firewall** - Only allow port 4310 from trusted networks
+5. **Keep AUTH_ENABLED=true** - For production use, always enable authentication
+
+### Reverse Proxy Example (nginx)
+```nginx
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:4310;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
 ## Section-by-section tour
 
 ### Overview

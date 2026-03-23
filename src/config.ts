@@ -9,6 +9,16 @@ if (existsSync(DOTENV_PATH)) {
 
 export const GATEWAY_URL = readStringEnv(process.env.GATEWAY_URL, "ws://127.0.0.1:18789");
 
+// Auth configuration
+export const AUTH_ENABLED = process.env.AUTH_ENABLED === "true";
+export const AUTH_SUPABASE_URL = process.env.AUTH_SUPABASE_URL || "";
+export const AUTH_SUPABASE_KEY = process.env.AUTH_SUPABASE_KEY || "";
+export const AUTH_REDIS_HOST = readStringEnv(process.env.AUTH_REDIS_HOST, "127.0.0.1");
+export const AUTH_REDIS_PORT = parsePositiveInt(process.env.AUTH_REDIS_PORT, 6379);
+export const AUTH_REDIS_PASSWORD = process.env.AUTH_REDIS_PASSWORD || "";
+export const AUTH_SESSION_TTL_SECONDS = parsePositiveInt(process.env.AUTH_SESSION_TTL_SECONDS, 7200); // 2 hours
+export const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "openclaw_session";
+
 export const READONLY_MODE = process.env.READONLY_MODE !== "false";
 export const APPROVAL_ACTIONS_ENABLED = process.env.APPROVAL_ACTIONS_ENABLED === "true";
 export const APPROVAL_ACTIONS_DRY_RUN = process.env.APPROVAL_ACTIONS_DRY_RUN !== "false";
