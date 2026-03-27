@@ -1,26 +1,53 @@
-import { getUserByUsername, getUserById, createUser, updateLastLogin } from "./supabase-client";
-import { verifyPassword } from "./crypto";
+import { hashPassword } from "./crypto";
 import { createSession, getSession, deleteSession, serializeUserPublic } from "./session-service";
-import type { User, UserPublic, LoginRequest, LoginResponse } from "./types";
+import { AUTH_PROVIDER } from "../config";
+import type { UserPublic, LoginRequest, LoginResponse } from "./types";
+
+let userService: any;
+
+async function getUserService() {
+  if (!userService) {
+    if (AUTH_PROVIDER === "mysql") {
+      const mysql = await import("./mysql-client");
+      userService = {
+        getUserByUsername: mysql.getUserByUsername,
+        getUserById: mysql.getUserById,
+        createUser: mysql.createUser,
+        updateLastLogin: mysql.updateLastLogin,
+      };
+    } else {
+      const supabase = await import("./supabase-client");
+      userService = {
+        getUserByUsername: supabase.getUserByUsername,
+        getUserById: supabase.getUserById,
+        createUser: supabase.createUser,
+        updateLastLogin: supabase.updateLastLogin,
+      };
+    }
+  }
+  return userService;
+}
 
 export async function login(
   request: LoginRequest,
   sessionTtlSeconds: number
 ): Promise<LoginResponse> {
   const { username, password } = request;
+  const service = await getUserService();
 
-  const user = await getUserByUsername(username);
+  const user = await service.getUserByUsername(username);
   if (!user) {
     return { success: false, error: "用户名或密码错误" };
   }
 
+  const { verifyPassword } = await import("./crypto");
   const passwordValid = await verifyPassword(password, user.password_hash);
   if (!passwordValid) {
     return { success: false, error: "用户名或密码错误" };
   }
 
   await createSession(user.id, sessionTtlSeconds);
-  await updateLastLogin(user.id);
+  await service.updateLastLogin(user.id);
 
   const userPublic = serializeUserPublic(user);
   return { success: true, user: userPublic };
@@ -36,7 +63,8 @@ export async function verifySession(sessionToken: string): Promise<{ valid: bool
     return { valid: false };
   }
 
-  const user = await getUserById(session.user_id);
+  const service = await getUserService();
+  const user = await service.getUserById(session.user_id);
   if (!user) {
     return { valid: false };
   }
@@ -50,7 +78,8 @@ export async function getCurrentUser(sessionToken: string): Promise<UserPublic |
     return null;
   }
 
-  const user = await getUserById(session.user_id);
+  const service = await getUserService();
+  const user = await service.getUserById(session.user_id);
   if (!user) {
     return null;
   }
@@ -63,8 +92,8 @@ export async function createUserAccount(
   password: string,
   role: "admin" | "user"
 ): Promise<UserPublic> {
-  const { hashPassword } = await import("./crypto");
+  const service = await getUserService();
   const passwordHash = await hashPassword(password);
-  const user = await createUser(username, passwordHash, role);
+  const user = await service.createUser(username, passwordHash, role);
   return serializeUserPublic(user);
 }

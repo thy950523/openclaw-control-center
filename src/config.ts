@@ -11,11 +11,20 @@ export const GATEWAY_URL = readStringEnv(process.env.GATEWAY_URL, "ws://127.0.0.
 
 // Auth configuration
 export const AUTH_ENABLED = process.env.AUTH_ENABLED === "true";
+export const AUTH_PROVIDER = process.env.AUTH_PROVIDER || "supabase"; // "supabase" or "mysql"
 export const AUTH_SUPABASE_URL = process.env.AUTH_SUPABASE_URL || "";
 export const AUTH_SUPABASE_KEY = process.env.AUTH_SUPABASE_KEY || "";
 export const AUTH_REDIS_HOST = readStringEnv(process.env.AUTH_REDIS_HOST, "127.0.0.1");
 export const AUTH_REDIS_PORT = parsePositiveInt(process.env.AUTH_REDIS_PORT, 6379);
 export const AUTH_REDIS_PASSWORD = process.env.AUTH_REDIS_PASSWORD || "";
+
+// MySQL configuration
+export const AUTH_MYSQL_HOST = readStringEnv(process.env.AUTH_MYSQL_HOST, "127.0.0.1");
+export const AUTH_MYSQL_PORT = parsePositiveInt(process.env.AUTH_MYSQL_PORT, 3306);
+export const AUTH_MYSQL_USER = process.env.AUTH_MYSQL_USER || "root";
+export const AUTH_MYSQL_PASSWORD = process.env.AUTH_MYSQL_PASSWORD || "";
+export const AUTH_MYSQL_DATABASE = process.env.AUTH_MYSQL_DATABASE || "openclaw_auth";
+
 export const AUTH_SESSION_TTL_SECONDS = parsePositiveInt(process.env.AUTH_SESSION_TTL_SECONDS, 7200); // 2 hours
 export const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "openclaw_session";
 

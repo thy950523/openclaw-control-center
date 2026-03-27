@@ -7,8 +7,14 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import {
   APPROVAL_ACTIONS_DRY_RUN,
   APPROVAL_ACTIONS_ENABLED,
-  AUTH_ENABLED,
   AUTH_COOKIE_NAME,
+  AUTH_ENABLED,
+  AUTH_MYSQL_DATABASE,
+  AUTH_MYSQL_HOST,
+  AUTH_MYSQL_PASSWORD,
+  AUTH_MYSQL_PORT,
+  AUTH_MYSQL_USER,
+  AUTH_PROVIDER,
   AUTH_REDIS_HOST,
   AUTH_REDIS_PASSWORD,
   AUTH_REDIS_PORT,
@@ -934,18 +940,7 @@ interface LinkageGraph {
 export function startUiServer(port: number, toolClient: ToolClient): Server {
   // Initialize auth clients if enabled
   if (AUTH_ENABLED) {
-    if (!AUTH_SUPABASE_URL || !AUTH_SUPABASE_KEY) {
-      console.error("[auth] AUTH_ENABLED but missing SUPABASE_URL or SUPABASE_KEY");
-      process.exit(1);
-    }
-    initSupabaseClient({
-      supabaseUrl: AUTH_SUPABASE_URL,
-      supabaseKey: AUTH_SUPABASE_KEY,
-      redisHost: AUTH_REDIS_HOST,
-      redisPort: AUTH_REDIS_PORT,
-      sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
-      cookieName: AUTH_COOKIE_NAME,
-    });
+    // Always initialize Redis for sessions
     initRedisClient({
       supabaseUrl: AUTH_SUPABASE_URL,
       supabaseKey: AUTH_SUPABASE_KEY,
@@ -955,7 +950,32 @@ export function startUiServer(port: number, toolClient: ToolClient): Server {
       sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
       cookieName: AUTH_COOKIE_NAME,
     });
-    console.log("[auth] Initialized successfully");
+
+    // Initialize user database (Supabase or MySQL)
+    if (AUTH_PROVIDER === "mysql") {
+      if (!AUTH_MYSQL_HOST || !AUTH_MYSQL_USER) {
+        console.error("[auth] AUTH_PROVIDER=mysql but missing MySQL configuration");
+        process.exit(1);
+      }
+      const { initMySQLClient } = require("../auth/mysql-client");
+      initMySQLClient();
+      console.log("[auth] MySQL client initialized");
+    } else {
+      if (!AUTH_SUPABASE_URL || !AUTH_SUPABASE_KEY) {
+        console.error("[auth] AUTH_PROVIDER=supabase but missing SUPABASE_URL or SUPABASE_KEY");
+        process.exit(1);
+      }
+      initSupabaseClient({
+        supabaseUrl: AUTH_SUPABASE_URL,
+        supabaseKey: AUTH_SUPABASE_KEY,
+        redisHost: AUTH_REDIS_HOST,
+        redisPort: AUTH_REDIS_PORT,
+        sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
+        cookieName: AUTH_COOKIE_NAME,
+      });
+      console.log("[auth] Supabase client initialized");
+    }
+    console.log("[auth] Initialized successfully with provider:", AUTH_PROVIDER);
   }
 
   const approvalActions = new ApprovalActionService(toolClient);

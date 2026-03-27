@@ -7,15 +7,21 @@ if (existsSync(DOTENV_PATH)) {
   process.loadEnvFile?.(DOTENV_PATH);
 }
 
-import { createUserAccount, getUserByUsername, initSupabaseClient, initRedisClient } from "../src/auth";
+import { createUserAccount, getUserByUsername, initRedisClient, initMySQLClient, initSupabaseClient } from "../src/auth";
 import {
   AUTH_ENABLED,
+  AUTH_PROVIDER,
   AUTH_REDIS_HOST,
   AUTH_REDIS_PASSWORD,
   AUTH_REDIS_PORT,
   AUTH_SESSION_TTL_SECONDS,
   AUTH_SUPABASE_URL,
   AUTH_SUPABASE_KEY,
+  AUTH_MYSQL_HOST,
+  AUTH_MYSQL_PORT,
+  AUTH_MYSQL_USER,
+  AUTH_MYSQL_PASSWORD,
+  AUTH_MYSQL_DATABASE,
 } from "../src/config";
 
 interface CLIArgs {
@@ -49,22 +55,7 @@ async function main() {
     process.exit(1);
   }
 
-  if (!AUTH_SUPABASE_URL || !AUTH_SUPABASE_KEY) {
-    console.error("Error: AUTH_SUPABASE_URL and AUTH_SUPABASE_KEY must be configured");
-    process.exit(1);
-  }
-
-  // Initialize clients
-  initSupabaseClient({
-    supabaseUrl: AUTH_SUPABASE_URL,
-    supabaseKey: AUTH_SUPABASE_KEY,
-    redisHost: AUTH_REDIS_HOST,
-    redisPort: AUTH_REDIS_PORT,
-    redisPassword: AUTH_REDIS_PASSWORD,
-    sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
-    cookieName: "openclaw_session",
-  });
-
+  // Always initialize Redis for sessions
   initRedisClient({
     supabaseUrl: AUTH_SUPABASE_URL,
     supabaseKey: AUTH_SUPABASE_KEY,
@@ -74,6 +65,31 @@ async function main() {
     sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
     cookieName: "openclaw_session",
   });
+
+  // Initialize user database based on provider
+  if (AUTH_PROVIDER === "mysql") {
+    if (!AUTH_MYSQL_HOST || !AUTH_MYSQL_USER) {
+      console.error("Error: AUTH_PROVIDER=mysql but missing MySQL configuration");
+      process.exit(1);
+    }
+    initMySQLClient();
+    console.log("[init-admin] MySQL client initialized");
+  } else {
+    if (!AUTH_SUPABASE_URL || !AUTH_SUPABASE_KEY) {
+      console.error("Error: AUTH_PROVIDER=supabase but missing SUPABASE_URL or SUPABASE_KEY");
+      process.exit(1);
+    }
+    initSupabaseClient({
+      supabaseUrl: AUTH_SUPABASE_URL,
+      supabaseKey: AUTH_SUPABASE_KEY,
+      redisHost: AUTH_REDIS_HOST,
+      redisPort: AUTH_REDIS_PORT,
+      redisPassword: AUTH_REDIS_PASSWORD,
+      sessionTtlSeconds: AUTH_SESSION_TTL_SECONDS,
+      cookieName: "openclaw_session",
+    });
+    console.log("[init-admin] Supabase client initialized");
+  }
 
   const args = parseArgs();
   const username = args.username || "admin";
